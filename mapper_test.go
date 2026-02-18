@@ -1,4 +1,3 @@
-// mapper_test.go
 package mappo
 
 import "testing"
