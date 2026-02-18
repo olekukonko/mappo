@@ -1,4 +1,3 @@
-// ordered_test.go
 package mappo
 
 import (
