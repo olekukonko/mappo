@@ -1,4 +1,3 @@
-// lru_test.go
 package mappo
 
 import (
@@ -48,6 +47,10 @@ func TestLRU_Peek(t *testing.T) {
 		t.Error("expected value1")
 	}
 	l.Set("key3", "value3")
+	_, ok = l.Get("key1")
+	if ok {
+		t.Error("expected key1 evicted")
+	}
 	val, ok = l.Get("key2")
 	if !ok {
 		t.Error("expected key2 not evicted")
@@ -103,7 +106,7 @@ func TestLRU_KeysForEach(t *testing.T) {
 }
 
 func TestLRU_Concurrent(t *testing.T) {
-	l := NewLRUWithConfig[string, int](LRUConfig[string, int]{MaxSize: 100, Concurrent: true})
+	l := NewLRUWithConfig[string, int](LRUConfig[string, int]{MaxSize: 100})
 	var wg sync.WaitGroup
 	for i := 0; i < 100; i++ {
 		wg.Add(1)
