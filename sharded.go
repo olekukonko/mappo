@@ -152,21 +152,29 @@ func (sm *Sharded[K, V]) SetIfAbsent(key K, val V) (V, bool) {
 	shard := sm.getShard(key)
 
 	var actual V
-	loaded := true
+	var loaded bool
 
 	shard.data.Compute(key, func(oldV V, exists bool) (V, bool) {
 		if exists {
 			actual = oldV
 			loaded = true
-			return oldV, true // Keep existing
+			return oldV, false // delete=false, keep existing
 		}
 		actual = val
 		loaded = false
 		shard.size.Add(1)
-		return val, true // Store new
+		return val, false // delete=false, store new
 	})
 
 	return actual, loaded
+}
+
+// Update performs an atomic read-modify-write and returns the new value.
+// Semantically equivalent to Compute(fn) but signals "always keep" intent.
+func (sm *Sharded[K, V]) Update(key K, fn func(current V, exists bool) V) V {
+	return sm.Compute(key, func(curr V, exists bool) (V, bool) {
+		return fn(curr, exists), true
+	})
 }
 
 // Compute allows atomic read-modify-write operations on a key within a shard.
@@ -183,7 +191,7 @@ func (sm *Sharded[K, V]) Compute(key K, fn func(current V, exists bool) (newValu
 				shard.size.Add(1)
 			}
 			result = newV
-			return newV, true
+			return newV, false // delete=false
 		}
 		// Delete
 		if exists {
@@ -191,7 +199,7 @@ func (sm *Sharded[K, V]) Compute(key K, fn func(current V, exists bool) (newValu
 		}
 		var zero V
 		result = zero
-		return zero, false
+		return zero, true // delete=true
 	})
 
 	return result
@@ -203,15 +211,16 @@ func (sm *Sharded[K, V]) Replace(key K, val V) (V, bool) {
 	shard := sm.getShard(key)
 
 	var old V
-	replaced := false
+	var replaced bool
 
 	shard.data.Compute(key, func(current V, exists bool) (V, bool) {
 		if !exists {
-			return current, false // Don't create
+			var zero V
+			return zero, true // delete=true, no create
 		}
 		old = current
 		replaced = true
-		return val, true
+		return val, false // delete=false
 	})
 
 	return old, replaced
@@ -225,13 +234,13 @@ func (sm *Sharded[K, V]) CompareAndSwap(key K, old V, newV V) bool {
 		if !exists || !reflect.DeepEqual(current, old) {
 			swapped = false
 			if exists {
-				return current, true
+				return current, false // delete=false, keep
 			}
 			var zero V
-			return zero, false
+			return zero, true // delete=true, no store
 		}
 		swapped = true
-		return newV, true
+		return newV, false // delete=false, store
 	})
 	return swapped
 }

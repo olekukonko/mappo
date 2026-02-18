@@ -14,6 +14,10 @@ type Ordered[K comparable, V any] struct {
 	items     *xsync.MapOf[K, *orderedElement[K, V]]
 	order     *list.List
 	muEnabled bool
+
+	// Per-instance pool for orderedElement (no global state)
+	// Note: list.Element cannot be pooled due to unexported fields
+	elemPool *sync.Pool
 }
 
 type orderedElement[K comparable, V any] struct {
@@ -35,10 +39,41 @@ func NewOrdered[K comparable, V any]() *Ordered[K, V] {
 
 // NewOrderedWithConfig creates a new ordered map with configuration.
 func NewOrderedWithConfig[K comparable, V any](cfg OrderedConfig) *Ordered[K, V] {
-	return &Ordered[K, V]{
+	o := &Ordered[K, V]{
 		items:     xsync.NewMapOf[K, *orderedElement[K, V]](),
 		order:     list.New(),
 		muEnabled: cfg.Concurrent,
+	}
+
+	// Initialize per-instance pool for orderedElement
+	if cfg.Concurrent {
+		o.elemPool = &sync.Pool{
+			New: func() any {
+				return &orderedElement[K, V]{}
+			},
+		}
+	}
+
+	return o
+}
+
+// getOrderedElement gets an orderedElement from pool or allocates new.
+func (o *Ordered[K, V]) getOrderedElement() *orderedElement[K, V] {
+	if o.elemPool != nil {
+		if e := o.elemPool.Get(); e != nil {
+			elem := e.(*orderedElement[K, V])
+			elem.element = nil // Clear reference
+			return elem
+		}
+	}
+	return &orderedElement[K, V]{}
+}
+
+// putOrderedElement returns orderedElement to pool.
+func (o *Ordered[K, V]) putOrderedElement(e *orderedElement[K, V]) {
+	if o.elemPool != nil && e != nil {
+		e.element = nil // Clear reference to allow GC
+		o.elemPool.Put(e)
 	}
 }
 
@@ -55,13 +90,16 @@ func (o *Ordered[K, V]) Set(key K, value V) {
 		return
 	}
 
-	// New key - add to order
-	e := &orderedElement[K, V]{
-		Key:   key,
-		Value: value,
-	}
-	e.element = o.order.PushBack(e)
-	o.items.Store(key, e)
+	// New key - get from pool or allocate
+	oe := o.getOrderedElement()
+	oe.Key = key
+	oe.Value = value
+
+	// list.Element must be allocated fresh (unexported fields)
+	e := o.order.PushBack(oe)
+	oe.element = e
+
+	o.items.Store(key, oe)
 }
 
 // SetFront adds or updates a key-value pair at the front of the order.
@@ -79,12 +117,14 @@ func (o *Ordered[K, V]) SetFront(key K, value V) {
 	}
 
 	// New key - add to front
-	e := &orderedElement[K, V]{
-		Key:   key,
-		Value: value,
-	}
-	e.element = o.order.PushFront(e)
-	o.items.Store(key, e)
+	oe := o.getOrderedElement()
+	oe.Key = key
+	oe.Value = value
+
+	e := o.order.PushFront(oe)
+	oe.element = e
+
+	o.items.Store(key, oe)
 }
 
 // SetBack adds or updates a key-value pair at the back of the order.
@@ -157,6 +197,7 @@ func (o *Ordered[K, V]) Delete(key K) bool {
 
 	o.order.Remove(elem.element)
 	o.items.Delete(key)
+	o.putOrderedElement(elem)
 	return true
 }
 
@@ -178,6 +219,7 @@ func (o *Ordered[K, V]) DeleteAt(index int) bool {
 	elem := e.Value.(*orderedElement[K, V])
 	o.order.Remove(e)
 	o.items.Delete(elem.Key)
+	o.putOrderedElement(elem)
 	return true
 }
 
@@ -228,14 +270,17 @@ func (o *Ordered[K, V]) InsertBefore(key, mark K, value V) bool {
 	// Remove old if exists
 	if oldElem, exists := o.items.Load(key); exists {
 		o.order.Remove(oldElem.element)
+		o.putOrderedElement(oldElem)
 	}
 
-	e := &orderedElement[K, V]{
-		Key:   key,
-		Value: value,
-	}
-	e.element = o.order.InsertBefore(e, markElem.element)
-	o.items.Store(key, e)
+	oe := o.getOrderedElement()
+	oe.Key = key
+	oe.Value = value
+
+	e := o.order.InsertBefore(oe, markElem.element)
+	oe.element = e
+
+	o.items.Store(key, oe)
 	return true
 }
 
@@ -254,14 +299,17 @@ func (o *Ordered[K, V]) InsertAfter(key, mark K, value V) bool {
 	// Remove old if exists
 	if oldElem, exists := o.items.Load(key); exists {
 		o.order.Remove(oldElem.element)
+		o.putOrderedElement(oldElem)
 	}
 
-	e := &orderedElement[K, V]{
-		Key:   key,
-		Value: value,
-	}
-	e.element = o.order.InsertAfter(e, markElem.element)
-	o.items.Store(key, e)
+	oe := o.getOrderedElement()
+	oe.Key = key
+	oe.Value = value
+
+	e := o.order.InsertAfter(oe, markElem.element)
+	oe.element = e
+
+	o.items.Store(key, oe)
 	return true
 }
 
@@ -324,7 +372,9 @@ func (o *Ordered[K, V]) Reverse() {
 	o.order.Init()
 	for i := len(elems) - 1; i >= 0; i-- {
 		elem := elems[i]
-		elem.element = o.order.PushBack(elem)
+
+		e := o.order.PushBack(elem)
+		elem.element = e
 		o.items.Store(elem.Key, elem)
 	}
 }
@@ -349,6 +399,14 @@ func (o *Ordered[K, V]) Clear() {
 	if o.muEnabled {
 		o.mu.Lock()
 		defer o.mu.Unlock()
+	}
+
+	// Return elements to pool
+	if o.elemPool != nil {
+		for e := o.order.Front(); e != nil; e = e.Next() {
+			elem := e.Value.(*orderedElement[K, V])
+			o.putOrderedElement(elem)
+		}
 	}
 
 	o.items.Clear()
@@ -449,6 +507,7 @@ func (o *Ordered[K, V]) PopFront() (K, V, bool) {
 	elem := e.Value.(*orderedElement[K, V])
 	o.order.Remove(e)
 	o.items.Delete(elem.Key)
+	o.putOrderedElement(elem)
 	return elem.Key, elem.Value, true
 }
 
@@ -469,5 +528,6 @@ func (o *Ordered[K, V]) PopBack() (K, V, bool) {
 	elem := e.Value.(*orderedElement[K, V])
 	o.order.Remove(e)
 	o.items.Delete(elem.Key)
+	o.putOrderedElement(elem)
 	return elem.Key, elem.Value, true
 }
