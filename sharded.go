@@ -1,41 +1,51 @@
-// sharded.go
 package mappo
 
 import (
-	"fmt"
+	"hash/maphash"
 	"math/bits"
-	"sync"
+	"reflect"
+	"runtime"
+	"sync/atomic"
+	"unsafe"
 
-	"github.com/cespare/xxhash/v2"
+	"github.com/puzpuzpuz/xsync/v3"
 )
+
+// cacheLineSize is the assumed size of a CPU cache line.
+const cacheLineSize = 64
+
+// padding ensures shard doesn't false share with adjacent shards.
+type padding [cacheLineSize]byte
+
+// shard holds a portion of the map with its own lock-free structure.
+type shard[K comparable, V any] struct {
+	_    padding
+	data *xsync.MapOf[K, V]
+	_    padding
+	size atomic.Int64
+	_    padding
+}
 
 // Sharded provides a generic sharded map for high-concurrency scenarios.
 // It reduces lock contention by splitting the map into multiple shards.
-// Key K must be comparable; user provides hash func for sharding.
 type Sharded[K comparable, V any] struct {
 	shards []shard[K, V]
-	mask   uint32
-	hash   func(K) uint32
-}
-
-type shard[K comparable, V any] struct {
-	mu   sync.RWMutex
-	data map[K]V
+	mask   uint64
+	seed   maphash.Seed
+	hash   func(K, maphash.Seed) uint64
 }
 
 // ShardedConfig holds configuration for Sharded map.
 type ShardedConfig struct {
-	// ShardCount is the number of shards (rounded up to power of 2)
+	// ShardCount is the number of shards (rounded up to power of 2).
+	// If <= 0, defaults to 2*GOMAXPROCS.
 	ShardCount int
-	// HashFunc is optional custom hash function (uses xxhash if nil)
-	HashFunc func(key any) uint32
 }
 
 // DefaultShardedConfig returns default configuration.
 func DefaultShardedConfig() ShardedConfig {
 	return ShardedConfig{
-		ShardCount: 64,
-		HashFunc:   nil,
+		ShardCount: runtime.GOMAXPROCS(0) * 2,
 	}
 }
 
@@ -46,139 +56,256 @@ func NewSharded[K comparable, V any]() *Sharded[K, V] {
 
 // NewShardedWithConfig creates a new sharded map with custom configuration.
 func NewShardedWithConfig[K comparable, V any](cfg ShardedConfig) *Sharded[K, V] {
-	if cfg.ShardCount <= 0 {
-		cfg.ShardCount = 64
-	}
-	// Round up to power of 2 for better distribution
-	shardCount := 1 << bits.Len(uint(cfg.ShardCount-1))
-
-	hashFunc := cfg.HashFunc
-	if hashFunc == nil {
-		// Default to xxhash for any key type
-		hashFunc = func(key any) uint32 {
-			h64 := xxhash.Sum64String(fmt.Sprint(key))
-			return uint32(h64 ^ (h64 >> 32))
-		}
+	shardCount := cfg.ShardCount
+	if shardCount <= 0 {
+		shardCount = runtime.GOMAXPROCS(0) * 2
 	}
 
-	typedHash := func(k K) uint32 {
-		return hashFunc(any(k))
+	// Round up to next power of 2
+	n := shardCount
+	if n <= 0 {
+		n = 2
 	}
+	n = 1 << bits.Len64(uint64(n)-1)
+	if n < 2 {
+		n = 2
+	}
+	shardCount = n
 
 	sm := &Sharded[K, V]{
 		shards: make([]shard[K, V], shardCount),
-		mask:   uint32(shardCount - 1),
-		hash:   typedHash,
+		mask:   uint64(shardCount - 1),
+		seed:   maphash.MakeSeed(),
+		hash:   makeHasher[K](),
 	}
+
 	for i := range sm.shards {
-		sm.shards[i].data = make(map[K]V)
+		sm.shards[i].data = xsync.NewMapOf[K, V]()
 	}
+
 	return sm
 }
 
+// makeHasher creates a type-specific hash function.
+func makeHasher[K comparable]() func(K, maphash.Seed) uint64 {
+	var zero K
+	switch any(zero).(type) {
+	case string:
+		return func(k K, seed maphash.Seed) uint64 {
+			return maphash.String(seed, *(*string)(unsafe.Pointer(&k)))
+		}
+	case int:
+		return func(k K, seed maphash.Seed) uint64 {
+			return maphash.Bytes(seed, (*[8]byte)(unsafe.Pointer(&k))[:8])
+		}
+	case int64:
+		return func(k K, seed maphash.Seed) uint64 {
+			return maphash.Bytes(seed, (*[8]byte)(unsafe.Pointer(&k))[:8])
+		}
+	case uint64:
+		return func(k K, seed maphash.Seed) uint64 {
+			return maphash.Bytes(seed, (*[8]byte)(unsafe.Pointer(&k))[:8])
+		}
+	case []byte:
+		return func(k K, seed maphash.Seed) uint64 {
+			return maphash.Bytes(seed, *(*[]byte)(unsafe.Pointer(&k)))
+		}
+	default:
+		// Fallback: use maphash on memory representation
+		return func(k K, seed maphash.Seed) uint64 {
+			ptr := unsafe.Pointer(&k)
+			size := unsafe.Sizeof(k)
+			slice := unsafe.Slice((*byte)(ptr), size)
+			return maphash.Bytes(seed, slice)
+		}
+	}
+}
+
 func (sm *Sharded[K, V]) shardIndex(key K) int {
-	return int(sm.hash(key) & sm.mask)
+	h := sm.hash(key, sm.seed)
+	return int(h & sm.mask)
+}
+
+func (sm *Sharded[K, V]) getShard(key K) *shard[K, V] {
+	return &sm.shards[sm.shardIndex(key)]
 }
 
 // Get retrieves a value. Safe for concurrent use.
 func (sm *Sharded[K, V]) Get(key K) (V, bool) {
-	idx := sm.shardIndex(key)
-	shard := &sm.shards[idx]
-	shard.mu.RLock()
-	defer shard.mu.RUnlock()
-	v, ok := shard.data[key]
-	return v, ok
+	shard := sm.getShard(key)
+	return shard.data.Load(key)
 }
 
 // Set sets a value. Safe for concurrent use.
 func (sm *Sharded[K, V]) Set(key K, val V) {
-	idx := sm.shardIndex(key)
-	shard := &sm.shards[idx]
-	shard.mu.Lock()
-	shard.data[key] = val
-	shard.mu.Unlock()
+	shard := sm.getShard(key)
+	_, loaded := shard.data.Load(key)
+	shard.data.Store(key, val)
+	if !loaded {
+		shard.size.Add(1)
+	}
 }
 
-// Compute allows atomic read-modify-write operations on a key within a shard lock.
+// SetIfAbsent sets the value only if the key doesn't exist.
+// Returns the actual value and true if loaded (already existed).
+func (sm *Sharded[K, V]) SetIfAbsent(key K, val V) (V, bool) {
+	shard := sm.getShard(key)
+
+	var actual V
+	loaded := true
+
+	shard.data.Compute(key, func(oldV V, exists bool) (V, bool) {
+		if exists {
+			actual = oldV
+			loaded = true
+			return oldV, true // Keep existing
+		}
+		actual = val
+		loaded = false
+		shard.size.Add(1)
+		return val, true // Store new
+	})
+
+	return actual, loaded
+}
+
+// Compute allows atomic read-modify-write operations on a key within a shard.
 // The function fn receives the current value (or zero value) and existence flag.
 // It returns the new value and a boolean indicating if the key should be kept (true) or deleted (false).
 func (sm *Sharded[K, V]) Compute(key K, fn func(current V, exists bool) (newValue V, keep bool)) V {
-	idx := sm.shardIndex(key)
-	shard := &sm.shards[idx]
-	shard.mu.Lock()
-	defer shard.mu.Unlock()
+	shard := sm.getShard(key)
 
-	curr, exists := shard.data[key]
-	newVal, keep := fn(curr, exists)
+	var result V
+	shard.data.Compute(key, func(oldV V, exists bool) (V, bool) {
+		newV, keep := fn(oldV, exists)
+		if keep {
+			if !exists {
+				shard.size.Add(1)
+			}
+			result = newV
+			return newV, true
+		}
+		// Delete
+		if exists {
+			shard.size.Add(-1)
+		}
+		var zero V
+		result = zero
+		return zero, false
+	})
 
-	if keep {
-		shard.data[key] = newVal
-	} else {
-		delete(shard.data, key)
-	}
-	return newVal
+	return result
+}
+
+// Replace replaces the value for a key only if it exists.
+// Returns the old value and true if replaced.
+func (sm *Sharded[K, V]) Replace(key K, val V) (V, bool) {
+	shard := sm.getShard(key)
+
+	var old V
+	replaced := false
+
+	shard.data.Compute(key, func(current V, exists bool) (V, bool) {
+		if !exists {
+			return current, false // Don't create
+		}
+		old = current
+		replaced = true
+		return val, true
+	})
+
+	return old, replaced
+}
+
+// CompareAndSwap swaps the value if the current value matches old.
+func (sm *Sharded[K, V]) CompareAndSwap(key K, old V, newV V) bool {
+	shard := sm.getShard(key)
+	var swapped bool
+	shard.data.Compute(key, func(current V, exists bool) (V, bool) {
+		if !exists || !reflect.DeepEqual(current, old) {
+			swapped = false
+			if exists {
+				return current, true
+			}
+			var zero V
+			return zero, false
+		}
+		swapped = true
+		return newV, true
+	})
+	return swapped
 }
 
 // Delete removes a key. Safe for concurrent use.
-func (sm *Sharded[K, V]) Delete(key K) {
-	idx := sm.shardIndex(key)
-	shard := &sm.shards[idx]
-	shard.mu.Lock()
-	delete(shard.data, key)
-	shard.mu.Unlock()
+func (sm *Sharded[K, V]) Delete(key K) bool {
+	shard := sm.getShard(key)
+	_, existed := shard.data.Load(key)
+	if existed {
+		shard.data.Delete(key)
+		shard.size.Add(-1)
+	}
+	return existed
 }
 
 // Clear resets all shards.
 func (sm *Sharded[K, V]) Clear() {
 	for i := range sm.shards {
-		shard := &sm.shards[i]
-		shard.mu.Lock()
-		shard.data = make(map[K]V)
-		shard.mu.Unlock()
+		sm.shards[i].data.Clear()
+		sm.shards[i].size.Store(0)
 	}
 }
 
 // ClearIf removes entries matching predicate and returns count removed.
 func (sm *Sharded[K, V]) ClearIf(shouldRemove func(K, V) bool) int {
-	var removed int
+	var total int64
 	for i := range sm.shards {
 		shard := &sm.shards[i]
-		shard.mu.Lock()
-		for k, v := range shard.data {
+		shard.data.Range(func(k K, v V) bool {
 			if shouldRemove(k, v) {
-				delete(shard.data, k)
-				removed++
+				shard.data.Delete(k)
+				shard.size.Add(-1)
+				total++
 			}
-		}
-		shard.mu.Unlock()
+			return true
+		})
 	}
-	return removed
+	return int(total)
 }
 
 // Len returns the total number of items across all shards.
 func (sm *Sharded[K, V]) Len() int {
-	count := 0
+	var total int64
 	for i := range sm.shards {
-		shard := &sm.shards[i]
-		shard.mu.RLock()
-		count += len(shard.data)
-		shard.mu.RUnlock()
+		total += sm.shards[i].size.Load()
 	}
-	return count
+	return int(total)
+}
+
+// Size returns the total number of items (alias for Len).
+func (sm *Sharded[K, V]) Size() int {
+	return sm.Len()
+}
+
+// ShardStats returns the distribution of items per shard.
+func (sm *Sharded[K, V]) ShardStats() []int {
+	stats := make([]int, len(sm.shards))
+	for i := range sm.shards {
+		stats[i] = int(sm.shards[i].size.Load())
+	}
+	return stats
 }
 
 // ForEach iterates through all items. Return false to stop iteration.
 func (sm *Sharded[K, V]) ForEach(fn func(K, V) bool) {
 	for i := range sm.shards {
-		shard := &sm.shards[i]
-		shard.mu.RLock()
-		for k, v := range shard.data {
-			if !fn(k, v) {
-				shard.mu.RUnlock()
-				return
-			}
+		cont := true
+		sm.shards[i].data.Range(func(k K, v V) bool {
+			cont = fn(k, v)
+			return cont
+		})
+		if !cont {
+			return
 		}
-		shard.mu.RUnlock()
 	}
 }
 
@@ -210,14 +337,5 @@ func (sm *Sharded[K, V]) Has(key K) bool {
 
 // GetOrSet returns the existing value for the key if present, otherwise sets and returns the given value.
 func (sm *Sharded[K, V]) GetOrSet(key K, val V) (actual V, loaded bool) {
-	idx := sm.shardIndex(key)
-	shard := &sm.shards[idx]
-	shard.mu.Lock()
-	defer shard.mu.Unlock()
-
-	if existing, ok := shard.data[key]; ok {
-		return existing, true
-	}
-	shard.data[key] = val
-	return val, false
+	return sm.SetIfAbsent(key, val)
 }

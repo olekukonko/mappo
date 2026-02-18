@@ -1,4 +1,3 @@
-// sharded_test.go
 package mappo
 
 import (
