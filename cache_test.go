@@ -1,4 +1,3 @@
-// cache_test.go
 package mappo
 
 import (

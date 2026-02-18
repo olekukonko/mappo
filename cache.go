@@ -1,8 +1,8 @@
-// cache.go
 package mappo
 
 import (
 	"encoding/json"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -55,8 +55,10 @@ type CacheOptions struct {
 // Cache provides a high-performance concurrent cache with TTL support.
 // It uses Otter as the underlying cache for optimal performance.
 type Cache struct {
-	inner *otter.Cache[string, *Item]
-	now   func() time.Time
+	inner  *otter.Cache[string, *Item]
+	now    func() time.Time
+	closed atomic.Bool
+	mu     sync.RWMutex
 }
 
 // NewCache creates a new Cache with the given options.
@@ -84,6 +86,9 @@ func NewCache(opt CacheOptions) *Cache {
 
 // Load retrieves an item. Returns false if key doesn't exist or is expired.
 func (c *Cache) Load(key string) (*Item, bool) {
+	if c.closed.Load() {
+		return nil, false
+	}
 	it, ok := c.inner.GetIfPresent(key)
 	if !ok || it == nil {
 		return nil, false
@@ -92,17 +97,21 @@ func (c *Cache) Load(key string) (*Item, bool) {
 		c.inner.Invalidate(key)
 		return nil, false
 	}
+	it.LastAccessed.Store(c.now().UnixNano())
 	return it, true
 }
 
 // Store stores an item.
 func (c *Cache) Store(key string, it *Item) {
+	if c.closed.Load() || it == nil {
+		return
+	}
 	c.inner.Set(key, it)
 }
 
 // StoreTTL stores an item with TTL.
 func (c *Cache) StoreTTL(key string, it *Item, ttl time.Duration) {
-	if it == nil {
+	if c.closed.Load() || it == nil {
 		return
 	}
 	if ttl > 0 {
@@ -113,21 +122,43 @@ func (c *Cache) StoreTTL(key string, it *Item, ttl time.Duration) {
 	c.inner.Set(key, it)
 }
 
-// LoadOrStore loads or stores an item.
+// LoadOrStore loads or stores an item atomically.
+// Returns the actual value stored and true if the value was loaded (already existed), false if stored.
 func (c *Cache) LoadOrStore(key string, it *Item) (*Item, bool) {
-	v, stored := c.inner.SetIfAbsent(key, it)
-	if stored {
-		return v, false
+	if c.closed.Load() || it == nil {
+		return nil, false
 	}
 
+	// Try to store if absent
+	v, stored := c.inner.SetIfAbsent(key, it)
+	if stored {
+		// We stored it successfully
+		return it, false
+	}
+
+	// Key already exists, check expiration
 	if v == nil {
-		return nil, true
+		// Inconsistent state, overwrite
+		c.inner.Set(key, it)
+		return it, false
 	}
 
 	if !v.Exp.IsZero() && c.now().After(v.Exp) {
-		c.inner.Invalidate(key)
-		c.inner.Set(key, it)
-		return it, false
+		// Expired, replace using Compute
+		actual, _ := c.inner.Compute(key, func(current *Item, found bool) (*Item, otter.ComputeOp) {
+			if !found {
+				return it, otter.WriteOp
+			}
+			// Check again under lock
+			if current != nil && !current.Exp.IsZero() && c.now().After(current.Exp) {
+				return it, otter.WriteOp
+			}
+			return current, otter.CancelOp
+		})
+		if actual == it {
+			return it, false
+		}
+		return actual, true
 	}
 
 	return v, true
@@ -135,17 +166,37 @@ func (c *Cache) LoadOrStore(key string, it *Item) (*Item, bool) {
 
 // Delete removes a key.
 func (c *Cache) Delete(key string) {
+	if c.closed.Load() {
+		return
+	}
 	c.inner.Invalidate(key)
 }
 
-// LoadAndDelete loads and deletes an item.
+// LoadAndDelete loads and deletes an item atomically.
 func (c *Cache) LoadAndDelete(key string) (*Item, bool) {
-	it, ok := c.Load(key)
-	if !ok {
+	if c.closed.Load() {
 		return nil, false
 	}
-	c.inner.Invalidate(key)
-	return it, true
+
+	// Use Compute to get atomic read-delete
+	var deleted *Item
+	c.inner.Compute(key, func(current *Item, found bool) (*Item, otter.ComputeOp) {
+		if !found || current == nil {
+			return nil, otter.CancelOp
+		}
+		// Check expiration
+		if !current.Exp.IsZero() && c.now().After(current.Exp) {
+			deleted = nil
+			return nil, otter.InvalidateOp // Delete expired
+		}
+		deleted = current
+		return nil, otter.InvalidateOp // Delete
+	})
+
+	if deleted == nil {
+		return nil, false
+	}
+	return deleted, true
 }
 
 // GetTyped retrieves and type-asserts a value.
@@ -168,41 +219,63 @@ func (c *Cache) GetValue(key string) (any, bool) {
 }
 
 // GetOrSet returns the existing value for the key if present and not expired,
-// otherwise sets and returns the given value.
+// otherwise sets and returns the given value. Not fully atomic - use LoadOrStore for atomicity.
 func (c *Cache) GetOrSet(key string, value any, ttl time.Duration) (any, bool) {
-	// Try to get existing
+	// Fast path: try to get existing
 	if existing, ok := c.Load(key); ok {
 		return existing.Value, true
 	}
 
-	// Set new value
+	// Slow path: compute atomically
 	it := &Item{
 		Value: value,
 	}
 	if ttl > 0 {
 		it.Exp = c.now().Add(ttl)
 	}
-	c.inner.Set(key, it)
+
+	actual, loaded := c.LoadOrStore(key, it)
+	if loaded {
+		return actual.Value, true
+	}
 	return value, false
 }
 
-// GetOrCompute returns the existing value or computes and stores a new one.
+// GetOrCompute returns the existing value or computes and stores a new one atomically.
 func (c *Cache) GetOrCompute(key string, fn func() (any, time.Duration)) any {
-	// Try to get existing
+	if c.closed.Load() {
+		return nil
+	}
+
+	// Try fast path first
 	if existing, ok := c.Load(key); ok {
 		return existing.Value
 	}
 
-	// Compute new value
-	val, ttl := fn()
-	it := &Item{
-		Value: val,
-	}
-	if ttl > 0 {
-		it.Exp = c.now().Add(ttl)
-	}
-	c.inner.Set(key, it)
-	return val
+	// Use Compute for atomic operation
+	var result any
+	c.inner.Compute(key, func(current *Item, found bool) (*Item, otter.ComputeOp) {
+		if found && current != nil {
+			// Check expiration
+			if current.Exp.IsZero() || c.now().Before(current.Exp) {
+				result = current.Value
+				return current, otter.CancelOp
+			}
+		}
+
+		// Compute new value
+		val, ttl := fn()
+		it := &Item{
+			Value: val,
+		}
+		if ttl > 0 {
+			it.Exp = c.now().Add(ttl)
+		}
+		result = val
+		return it, otter.WriteOp
+	})
+
+	return result
 }
 
 // Has returns true if the key exists and is not expired.
@@ -213,17 +286,26 @@ func (c *Cache) Has(key string) bool {
 
 // Len returns the number of items in the cache.
 func (c *Cache) Len() int {
+	if c.closed.Load() {
+		return 0
+	}
 	return c.inner.EstimatedSize()
 }
 
 // Clear removes all items.
 func (c *Cache) Clear() {
+	if c.closed.Load() {
+		return
+	}
 	c.inner.InvalidateAll()
 }
 
 // Range iterates over all items in the cache.
 // Return false to stop iteration.
 func (c *Cache) Range(fn func(key string, item *Item) bool) {
+	if c.closed.Load() {
+		return
+	}
 	c.inner.All()(func(key string, item *Item) bool {
 		// Check expiration
 		if !item.Exp.IsZero() && c.now().After(item.Exp) {
@@ -244,6 +326,58 @@ func (c *Cache) Keys() []string {
 	return keys
 }
 
+// RefreshTTL updates the TTL of an existing item without changing its value.
+// Returns true if the item was found and updated.
+func (c *Cache) RefreshTTL(key string, ttl time.Duration) bool {
+	if c.closed.Load() {
+		return false
+	}
+
+	updated := false
+	c.inner.Compute(key, func(current *Item, found bool) (*Item, otter.ComputeOp) {
+		if !found || current == nil {
+			return nil, otter.CancelOp
+		}
+		// Check if expired
+		if !current.Exp.IsZero() && c.now().After(current.Exp) {
+			return nil, otter.InvalidateOp // Delete expired
+		}
+
+		if ttl > 0 {
+			current.Exp = c.now().Add(ttl)
+		} else {
+			current.Exp = time.Time{}
+		}
+		updated = true
+		return current, otter.WriteOp
+	})
+
+	return updated
+}
+
+// Touch updates the LastAccessed timestamp without fetching the full value.
+// Returns true if the item exists and is not expired.
+func (c *Cache) Touch(key string) bool {
+	if c.closed.Load() {
+		return false
+	}
+
+	touched := false
+	c.inner.Compute(key, func(current *Item, found bool) (*Item, otter.ComputeOp) {
+		if !found || current == nil {
+			return nil, otter.CancelOp
+		}
+		if !current.Exp.IsZero() && c.now().After(current.Exp) {
+			return nil, otter.InvalidateOp
+		}
+		current.LastAccessed.Store(c.now().UnixNano())
+		touched = true
+		return current, otter.WriteOp
+	})
+
+	return touched
+}
+
 // CacheStats holds cache statistics.
 type CacheStats struct {
 	Hits      int64
@@ -255,6 +389,9 @@ type CacheStats struct {
 
 // Stats returns cache statistics.
 func (c *Cache) Stats() CacheStats {
+	if c.closed.Load() {
+		return CacheStats{}
+	}
 	stats := c.inner.Stats()
 	return CacheStats{
 		Hits:      int64(stats.Hits),
@@ -263,4 +400,14 @@ func (c *Cache) Stats() CacheStats {
 		Size:      int64(c.Len()),
 		Capacity:  int64(c.inner.GetMaximum()),
 	}
+}
+
+// Close closes the cache and releases resources.
+// Note: otter cache doesn't have an explicit Close method,
+// we just mark it as closed to prevent further operations.
+func (c *Cache) Close() error {
+	if c.closed.CompareAndSwap(false, true) {
+		c.inner.InvalidateAll()
+	}
+	return nil
 }
