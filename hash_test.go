@@ -1,215 +1,163 @@
 package mappo
 
 import (
+	"hash/maphash"
 	"testing"
+	"unsafe"
 )
 
-func TestStringHasher(t *testing.T) {
-	h := StringHasher{}
-	if h.Hash("test") == 0 {
-		t.Error("expected non-zero hash")
-	}
-	if h.Hash("test") != h.Hash("test") {
-		t.Error("expected same hash")
-	}
-	if h.Hash("test1") == h.Hash("test2") {
-		t.Error("expected different hashes")
-	}
+func TestMakeHasher(t *testing.T) {
+	seed := maphash.MakeSeed()
+
+	t.Run("string", func(t *testing.T) {
+		hasher := makeHasher[string]()
+		h1 := hasher("test", seed)
+		h2 := hasher("test", seed)
+		if h1 != h2 {
+			t.Error("inconsistent hash for same key")
+		}
+		if h1 == hasher("other", seed) {
+			t.Error("same hash for different keys")
+		}
+	})
+
+	t.Run("int", func(t *testing.T) {
+		hasher := makeHasher[int]()
+		h1 := hasher(42, seed)
+		h2 := hasher(42, seed)
+		if h1 != h2 {
+			t.Error("inconsistent hash for same key")
+		}
+		if h1 == hasher(43, seed) {
+			t.Error("same hash for different keys")
+		}
+		// Check seed independence
+		otherSeed := maphash.MakeSeed()
+		if h1 == hasher(42, otherSeed) {
+			t.Error("hash should differ with different seed")
+		}
+	})
+
+	t.Run("int64", func(t *testing.T) {
+		hasher := makeHasher[int64]()
+		h1 := hasher(42, seed)
+		h2 := hasher(42, seed)
+		if h1 != h2 {
+			t.Error("inconsistent hash for same key")
+		}
+		if h1 == hasher(43, seed) {
+			t.Error("same hash for different keys")
+		}
+	})
+
+	t.Run("uint64", func(t *testing.T) {
+		hasher := makeHasher[uint64]()
+		h1 := hasher(42, seed)
+		h2 := hasher(42, seed)
+		if h1 != h2 {
+			t.Error("inconsistent hash for same key")
+		}
+		if h1 == hasher(43, seed) {
+			t.Error("same hash for different keys")
+		}
+	})
+
+	t.Run("default (struct)", func(t *testing.T) {
+		type testKey struct {
+			a int
+			b string
+		}
+		hasher := makeHasher[testKey]()
+		key := testKey{1, "a"}
+		h1 := hasher(key, seed)
+		h2 := hasher(key, seed)
+		if h1 != h2 {
+			t.Error("inconsistent hash for same key")
+		}
+		if h1 == hasher(testKey{2, "b"}, seed) {
+			t.Error("same hash for different keys")
+		}
+		// Check memory representation
+		ptr := unsafe.Pointer(&key)
+		size := unsafe.Sizeof(key)
+		slice := unsafe.Slice((*byte)(ptr), size)
+		expected := maphash.Bytes(seed, slice)
+		if h1 != expected {
+			t.Error("fallback hash mismatch")
+		}
+	})
 }
 
-func TestIntHasher(t *testing.T) {
-	h := IntHasher{}
-	if h.Hash(42) == 0 {
-		t.Error("expected non-zero hash")
+func BenchmarkMakeHasherString(b *testing.B) {
+	hasher := makeHasher[string]()
+	seed := maphash.MakeSeed()
+	keys := make([]string, 1000)
+	for i := 0; i < 1000; i++ {
+		keys[i] = string([]byte{byte(i)})
 	}
-	if h.Hash(42) != h.Hash(42) {
-		t.Error("expected same hash")
-	}
-	if h.Hash(1) == h.Hash(2) {
-		t.Error("expected different hashes")
-	}
-}
 
-func TestInt64Hasher(t *testing.T) {
-	h := Int64Hasher{}
-	if h.Hash(42) == 0 {
-		t.Error("expected non-zero hash")
-	}
-	if h.Hash(42) != h.Hash(42) {
-		t.Error("expected same hash")
-	}
-	if h.Hash(1) == h.Hash(2) {
-		t.Error("expected different hashes")
-	}
-}
-
-func TestBytesHasher(t *testing.T) {
-	h := BytesHasher{}
-	if h.Hash([]byte("test")) == 0 {
-		t.Error("expected non-zero hash")
-	}
-	if h.Hash([]byte("test")) != h.Hash([]byte("test")) {
-		t.Error("expected same hash")
-	}
-	if h.Hash([]byte("test1")) == h.Hash([]byte("test2")) {
-		t.Error("expected different hashes")
-	}
-}
-
-func TestMaphashHasherString(t *testing.T) {
-	h := NewMaphashHasher[string]()
-	if h.Hash("test") == 0 {
-		t.Error("expected non-zero hash")
-	}
-	if h.Hash("test") != h.Hash("test") {
-		t.Error("expected same hash")
-	}
-	if h.Hash("test1") == h.Hash("test2") {
-		t.Error("expected different hashes")
-	}
-}
-
-func TestMaphashHasherInt(t *testing.T) {
-	h := NewMaphashHasher[int]()
-	if h.Hash(42) == 0 {
-		t.Error("expected non-zero hash")
-	}
-	if h.Hash(42) != h.Hash(42) {
-		t.Error("expected same hash")
-	}
-	if h.Hash(1) == h.Hash(2) {
-		t.Error("expected different hashes")
-	}
-}
-
-func TestHashString(t *testing.T) {
-	if HashString("test") == 0 {
-		t.Error("expected non-zero hash")
-	}
-	if HashString("test") != HashString("test") {
-		t.Error("expected same hash")
-	}
-	if HashString("test1") == HashString("test2") {
-		t.Error("expected different hashes")
-	}
-}
-
-func TestHashBytes(t *testing.T) {
-	if HashBytes([]byte("test")) == 0 {
-		t.Error("expected non-zero hash")
-	}
-	if HashBytes([]byte("test")) != HashBytes([]byte("test")) {
-		t.Error("expected same hash")
-	}
-	if HashBytes([]byte("test1")) == HashBytes([]byte("test2")) {
-		t.Error("expected different hashes")
-	}
-}
-
-func TestXxHash64(t *testing.T) {
-	if XxHash64("test") == 0 {
-		t.Error("expected non-zero hash")
-	}
-	if XxHash64("test") != XxHash64("test") {
-		t.Error("expected same hash")
-	}
-	if XxHash64("test1") == XxHash64("test2") {
-		t.Error("expected different hashes")
-	}
-}
-
-func TestXxHash32(t *testing.T) {
-	if XxHash32("test") == 0 {
-		t.Error("expected non-zero hash")
-	}
-	if XxHash32("test") != XxHash32("test") {
-		t.Error("expected same hash")
-	}
-	if XxHash32("test1") == XxHash32("test2") {
-		t.Error("expected different hashes")
-	}
-}
-
-func TestXxHash64Bytes(t *testing.T) {
-	if XxHash64Bytes([]byte("test")) == 0 {
-		t.Error("expected non-zero hash")
-	}
-	if XxHash64Bytes([]byte("test")) != XxHash64Bytes([]byte("test")) {
-		t.Error("expected same hash")
-	}
-	if XxHash64Bytes([]byte("test1")) == XxHash64Bytes([]byte("test2")) {
-		t.Error("expected different hashes")
-	}
-}
-
-func BenchmarkStringHasher(b *testing.B) {
-	h := StringHasher{}
+	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		h.Hash("benchmark key")
+		_ = hasher(keys[i%1000], seed)
 	}
 }
 
-func BenchmarkIntHasher(b *testing.B) {
-	h := IntHasher{}
+func BenchmarkMakeHasherInt(b *testing.B) {
+	hasher := makeHasher[int]()
+	seed := maphash.MakeSeed()
+	keys := make([]int, 1000)
+	for i := 0; i < 1000; i++ {
+		keys[i] = i
+	}
+
+	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		h.Hash(42)
+		_ = hasher(keys[i%1000], seed)
 	}
 }
 
-func BenchmarkInt64Hasher(b *testing.B) {
-	h := Int64Hasher{}
+func BenchmarkMakeHasherInt64(b *testing.B) {
+	hasher := makeHasher[int64]()
+	seed := maphash.MakeSeed()
+	keys := make([]int64, 1000)
+	for i := 0; i < 1000; i++ {
+		keys[i] = int64(i)
+	}
+
+	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		h.Hash(42)
+		_ = hasher(keys[i%1000], seed)
 	}
 }
 
-func BenchmarkBytesHasher(b *testing.B) {
-	h := BytesHasher{}
+func BenchmarkMakeHasherUint64(b *testing.B) {
+	hasher := makeHasher[uint64]()
+	seed := maphash.MakeSeed()
+	keys := make([]uint64, 1000)
+	for i := 0; i < 1000; i++ {
+		keys[i] = uint64(i)
+	}
+
+	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		h.Hash([]byte("benchmark key"))
+		_ = hasher(keys[i%1000], seed)
 	}
 }
 
-func BenchmarkMaphashHasherString(b *testing.B) {
-	h := NewMaphashHasher[string]()
-	for i := 0; i < b.N; i++ {
-		h.Hash("benchmark key")
+func BenchmarkMakeHasherDefault(b *testing.B) {
+	type testKey struct {
+		a int
+		b string
 	}
-}
-
-func BenchmarkMaphashHasherInt(b *testing.B) {
-	h := NewMaphashHasher[int]()
-	for i := 0; i < b.N; i++ {
-		h.Hash(42)
+	hasher := makeHasher[testKey]()
+	seed := maphash.MakeSeed()
+	keys := make([]testKey, 1000)
+	for i := 0; i < 1000; i++ {
+		keys[i] = testKey{i, string([]byte{byte(i)})}
 	}
-}
 
-func BenchmarkHashString(b *testing.B) {
+	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		HashString("benchmark key")
-	}
-}
-
-func BenchmarkHashBytes(b *testing.B) {
-	for i := 0; i < b.N; i++ {
-		HashBytes([]byte("benchmark key"))
-	}
-}
-
-func BenchmarkXxHash64(b *testing.B) {
-	for i := 0; i < b.N; i++ {
-		XxHash64("benchmark key")
-	}
-}
-
-func BenchmarkXxHash32(b *testing.B) {
-	for i := 0; i < b.N; i++ {
-		XxHash32("benchmark key")
-	}
-}
-
-func BenchmarkXxHash64Bytes(b *testing.B) {
-	for i := 0; i < b.N; i++ {
-		XxHash64Bytes([]byte("benchmark key"))
+		_ = hasher(keys[i%1000], seed)
 	}
 }

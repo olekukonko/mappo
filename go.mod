@@ -3,7 +3,6 @@ module github.com/olekukonko/mappo
 go 1.24.0
 
 require (
-	github.com/cespare/xxhash/v2 v2.3.0
 	github.com/maypok86/otter/v2 v2.3.0
 	github.com/puzpuzpuz/xsync/v3 v3.5.1
 )

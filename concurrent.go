@@ -27,7 +27,7 @@ func NewConcurrent[K comparable, V any]() *Concurrent[K, V] {
 // Get retrieves a value. Returns false if key doesn't exist or is expired.
 func (c *Concurrent[K, V]) Get(key K) (V, bool) {
 	entry, ok := c.m.Load(key)
-	if !ok {
+	if !ok || entry == nil {
 		var zero V
 		return zero, false
 	}
@@ -71,27 +71,30 @@ func (c *Concurrent[K, V]) SetIfAbsent(key K, value V) (V, bool) {
 
 // Compute allows atomic read-modify-write operations.
 func (c *Concurrent[K, V]) Compute(key K, fn func(current V, exists bool) (newValue V, keep bool)) V {
-	var result V
 	c.m.Compute(key, func(oldEntry *concurrentEntry[V], exists bool) (*concurrentEntry[V], bool) {
 		var oldV V
-		if exists && oldEntry != nil {
-			// Check expiration
+		existsAndValid := exists && oldEntry != nil
+
+		if existsAndValid {
 			if oldEntry.expiration > 0 && nowNano() > oldEntry.expiration {
-				exists = false
+				existsAndValid = false
 			} else {
 				oldV = oldEntry.value
 			}
 		}
 
-		newV, keep := fn(oldV, exists)
+		newV, keep := fn(oldV, existsAndValid)
 		if !keep {
-			return nil, false
+			return nil, true // delete=true: remove the entry
 		}
 
-		result = newV
-		return &concurrentEntry[V]{value: newV}, true
+		return &concurrentEntry[V]{value: newV}, false // delete=false: store the entry
 	})
-	return result
+
+	// After Compute, read back the actual stored value
+	// This handles CAS retries correctly
+	val, _ := c.Get(key)
+	return val
 }
 
 // Delete removes a key.
@@ -150,6 +153,106 @@ func (c *Concurrent[K, V]) Values() []V {
 		return true
 	})
 	return values
+}
+
+// Update performs an atomic read-modify-write and returns the new value.
+// Semantically equivalent to Compute(fn) but signals "always keep" intent.
+// API matches Sharded.Update
+func (c *Concurrent[K, V]) Update(key K, fn func(current V, exists bool) V) V {
+	return c.Compute(key, func(curr V, exists bool) (V, bool) {
+		return fn(curr, exists), true
+	})
+}
+
+// GetOrSet returns the existing value for the key if present, otherwise sets and returns the given value.
+// API matches Sharded.GetOrSet
+func (c *Concurrent[K, V]) GetOrSet(key K, val V) (actual V, loaded bool) {
+	return c.SetIfAbsent(key, val)
+}
+
+// Size returns the total number of items (alias for Len).
+// API matches Sharded.Size
+func (c *Concurrent[K, V]) Size() int {
+	return c.Len()
+}
+
+// ForEach iterates over all items. Return false to stop.
+// Expired items are skipped and deleted.
+// API matches Sharded.ForEach
+func (c *Concurrent[K, V]) ForEach(fn func(K, V) bool) {
+	c.Range(fn)
+}
+
+// ClearIf removes entries matching predicate and returns count removed.
+// API matches Sharded.ClearIf
+func (c *Concurrent[K, V]) ClearIf(shouldRemove func(K, V) bool) int {
+	var total int
+	c.m.Range(func(key K, entry *concurrentEntry[V]) bool {
+		// Check expiration first
+		if entry.expiration > 0 && nowNano() > entry.expiration {
+			c.m.Delete(key)
+			total++
+			return true
+		}
+
+		if shouldRemove(key, entry.value) {
+			c.m.Delete(key)
+			total++
+		}
+		return true
+	})
+	return total
+}
+
+// Replace replaces the value for a key only if it exists.
+// Returns the old value and true if replaced.
+// API matches Sharded.Replace
+func (c *Concurrent[K, V]) Replace(key K, val V) (V, bool) {
+	var old V
+	var replaced bool
+
+	c.m.Compute(key, func(current *concurrentEntry[V], exists bool) (*concurrentEntry[V], bool) {
+		if !exists || current == nil {
+			return nil, false // don't create
+		}
+		// Check expiration
+		if current.expiration > 0 && nowNano() > current.expiration {
+			return nil, false // expired, don't create
+		}
+		old = current.value
+		replaced = true
+		return &concurrentEntry[V]{value: val, expiration: current.expiration}, true
+	})
+
+	return old, replaced
+}
+
+// CompareAndSwap swaps the value if the current value matches old.
+// API matches Sharded.CompareAndSwap
+func (c *Concurrent[K, V]) CompareAndSwap(key K, old V, newV V) bool {
+	var swapped bool
+	c.m.Compute(key, func(current *concurrentEntry[V], exists bool) (*concurrentEntry[V], bool) {
+		if !exists || current == nil {
+			swapped = false
+			return nil, false
+		}
+
+		// Check expiration
+		if current.expiration > 0 && nowNano() > current.expiration {
+			swapped = false
+			return nil, false
+		}
+
+		// Use reflection for generic comparison
+		if any(current.value) != any(old) {
+			swapped = false
+			return current, true
+		}
+
+		swapped = true
+		return &concurrentEntry[V]{value: newV, expiration: current.expiration}, true
+	})
+	return swapped
 }
 
 // nowNano returns current time in nanoseconds.

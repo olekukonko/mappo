@@ -84,6 +84,14 @@ func NewCache(opt CacheOptions) *Cache {
 	return &Cache{inner: c, now: nowFn}
 }
 
+// nowTime returns current time, using custom function if set.
+func (c *Cache) nowTime() time.Time {
+	if c.now != nil {
+		return c.now()
+	}
+	return time.Now()
+}
+
 // Load retrieves an item. Returns false if key doesn't exist or is expired.
 func (c *Cache) Load(key string) (*Item, bool) {
 	if c.closed.Load() {
@@ -93,11 +101,12 @@ func (c *Cache) Load(key string) (*Item, bool) {
 	if !ok || it == nil {
 		return nil, false
 	}
-	if !it.Exp.IsZero() && c.now().After(it.Exp) {
+	now := c.nowTime()
+	if !it.Exp.IsZero() && now.After(it.Exp) {
 		c.inner.Invalidate(key)
 		return nil, false
 	}
-	it.LastAccessed.Store(c.now().UnixNano())
+	it.LastAccessed.Store(now.UnixNano())
 	return it, true
 }
 
@@ -115,7 +124,7 @@ func (c *Cache) StoreTTL(key string, it *Item, ttl time.Duration) {
 		return
 	}
 	if ttl > 0 {
-		it.Exp = c.now().Add(ttl)
+		it.Exp = c.nowTime().Add(ttl)
 	} else {
 		it.Exp = time.Time{}
 	}
@@ -143,14 +152,15 @@ func (c *Cache) LoadOrStore(key string, it *Item) (*Item, bool) {
 		return it, false
 	}
 
-	if !v.Exp.IsZero() && c.now().After(v.Exp) {
+	now := c.nowTime()
+	if !v.Exp.IsZero() && now.After(v.Exp) {
 		// Expired, replace using Compute
 		actual, _ := c.inner.Compute(key, func(current *Item, found bool) (*Item, otter.ComputeOp) {
 			if !found {
 				return it, otter.WriteOp
 			}
 			// Check again under lock
-			if current != nil && !current.Exp.IsZero() && c.now().After(current.Exp) {
+			if current != nil && !current.Exp.IsZero() && now.After(current.Exp) {
 				return it, otter.WriteOp
 			}
 			return current, otter.CancelOp
@@ -185,7 +195,8 @@ func (c *Cache) LoadAndDelete(key string) (*Item, bool) {
 			return nil, otter.CancelOp
 		}
 		// Check expiration
-		if !current.Exp.IsZero() && c.now().After(current.Exp) {
+		now := c.nowTime()
+		if !current.Exp.IsZero() && now.After(current.Exp) {
 			deleted = nil
 			return nil, otter.InvalidateOp // Delete expired
 		}
@@ -231,7 +242,7 @@ func (c *Cache) GetOrSet(key string, value any, ttl time.Duration) (any, bool) {
 		Value: value,
 	}
 	if ttl > 0 {
-		it.Exp = c.now().Add(ttl)
+		it.Exp = c.nowTime().Add(ttl)
 	}
 
 	actual, loaded := c.LoadOrStore(key, it)
@@ -254,10 +265,11 @@ func (c *Cache) GetOrCompute(key string, fn func() (any, time.Duration)) any {
 
 	// Use Compute for atomic operation
 	var result any
+	now := c.nowTime()
 	c.inner.Compute(key, func(current *Item, found bool) (*Item, otter.ComputeOp) {
 		if found && current != nil {
 			// Check expiration
-			if current.Exp.IsZero() || c.now().Before(current.Exp) {
+			if current.Exp.IsZero() || now.Before(current.Exp) {
 				result = current.Value
 				return current, otter.CancelOp
 			}
@@ -269,7 +281,7 @@ func (c *Cache) GetOrCompute(key string, fn func() (any, time.Duration)) any {
 			Value: val,
 		}
 		if ttl > 0 {
-			it.Exp = c.now().Add(ttl)
+			it.Exp = now.Add(ttl)
 		}
 		result = val
 		return it, otter.WriteOp
@@ -302,14 +314,15 @@ func (c *Cache) Clear() {
 
 // Range iterates over all items in the cache.
 // Return false to stop iteration.
+// Expired items are skipped but not deleted during iteration.
 func (c *Cache) Range(fn func(key string, item *Item) bool) {
 	if c.closed.Load() {
 		return
 	}
+	now := c.nowTime()
 	c.inner.All()(func(key string, item *Item) bool {
-		// Check expiration
-		if !item.Exp.IsZero() && c.now().After(item.Exp) {
-			c.inner.Invalidate(key)
+		// Skip expired items without deleting (let Otter handle cleanup)
+		if !item.Exp.IsZero() && now.After(item.Exp) {
 			return true
 		}
 		return fn(key, item)
@@ -334,17 +347,18 @@ func (c *Cache) RefreshTTL(key string, ttl time.Duration) bool {
 	}
 
 	updated := false
+	now := c.nowTime()
 	c.inner.Compute(key, func(current *Item, found bool) (*Item, otter.ComputeOp) {
 		if !found || current == nil {
 			return nil, otter.CancelOp
 		}
 		// Check if expired
-		if !current.Exp.IsZero() && c.now().After(current.Exp) {
+		if !current.Exp.IsZero() && now.After(current.Exp) {
 			return nil, otter.InvalidateOp // Delete expired
 		}
 
 		if ttl > 0 {
-			current.Exp = c.now().Add(ttl)
+			current.Exp = now.Add(ttl)
 		} else {
 			current.Exp = time.Time{}
 		}
@@ -363,14 +377,15 @@ func (c *Cache) Touch(key string) bool {
 	}
 
 	touched := false
+	now := c.nowTime()
 	c.inner.Compute(key, func(current *Item, found bool) (*Item, otter.ComputeOp) {
 		if !found || current == nil {
 			return nil, otter.CancelOp
 		}
-		if !current.Exp.IsZero() && c.now().After(current.Exp) {
+		if !current.Exp.IsZero() && now.After(current.Exp) {
 			return nil, otter.InvalidateOp
 		}
-		current.LastAccessed.Store(c.now().UnixNano())
+		current.LastAccessed.Store(now.UnixNano())
 		touched = true
 		return current, otter.WriteOp
 	})

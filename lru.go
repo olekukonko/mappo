@@ -143,6 +143,7 @@ func (l *LRU[K, V]) Set(key K, value V) {
 	l.SetWithTTL(key, value, l.defaultTTL)
 }
 
+// SetWithTTL stores a value with TTL.
 func (l *LRU[K, V]) SetWithTTL(key K, value V, ttl time.Duration) {
 	var exp int64
 	if ttl > 0 {
@@ -189,6 +190,7 @@ func (l *LRU[K, V]) SetWithTTL(key K, value V, ttl time.Duration) {
 	l.size.Add(1)
 }
 
+// Get retrieves a value and moves it to front.
 func (l *LRU[K, V]) Get(key K) (V, bool) {
 	idx, ok := l.m.Load(key)
 	if !ok {
@@ -223,6 +225,7 @@ func (l *LRU[K, V]) Get(key K) (V, bool) {
 	return node.value, true
 }
 
+// Peek retrieves a value without moving it.
 func (l *LRU[K, V]) Peek(key K) (V, bool) {
 	idx, ok := l.m.Load(key)
 	if !ok {
@@ -252,6 +255,7 @@ func (l *LRU[K, V]) Peek(key K) (V, bool) {
 	return node.value, true
 }
 
+// Delete removes a key.
 func (l *LRU[K, V]) Delete(key K) bool {
 	idx, ok := l.m.Load(key)
 	if !ok {
@@ -280,6 +284,7 @@ func (l *LRU[K, V]) Len() int {
 	return int(l.size.Load())
 }
 
+// Clear removes all items.
 func (l *LRU[K, V]) Clear() {
 	l.listMu.Lock()
 	defer l.listMu.Unlock()
@@ -300,6 +305,7 @@ func (l *LRU[K, V]) Clear() {
 	l.size.Store(0)
 }
 
+// Keys returns all keys in order.
 func (l *LRU[K, V]) Keys() []K {
 	l.listMu.Lock()
 	defer l.listMu.Unlock()
@@ -319,6 +325,7 @@ func (l *LRU[K, V]) Keys() []K {
 	return keys
 }
 
+// Values returns all values in order.
 func (l *LRU[K, V]) Values() []V {
 	l.listMu.Lock()
 	defer l.listMu.Unlock()
@@ -338,6 +345,7 @@ func (l *LRU[K, V]) Values() []V {
 	return values
 }
 
+// ForEach iterates over all items in order.
 func (l *LRU[K, V]) ForEach(fn func(K, V) bool) {
 	l.listMu.Lock()
 	defer l.listMu.Unlock()
@@ -358,6 +366,7 @@ func (l *LRU[K, V]) ForEach(fn func(K, V) bool) {
 	}
 }
 
+// GetOrSet gets existing or sets new value.
 func (l *LRU[K, V]) GetOrSet(key K, value V, ttl time.Duration) (V, bool) {
 	if v, ok := l.Get(key); ok {
 		return v, true
@@ -419,6 +428,7 @@ func (l *LRU[K, V]) GetOrCompute(key K, fn func() (V, time.Duration)) V {
 	return actual
 }
 
+// Resize changes the max size.
 func (l *LRU[K, V]) Resize(maxSize int) {
 	if maxSize <= 0 {
 		maxSize = 1000
@@ -438,6 +448,7 @@ func (l *LRU[K, V]) Resize(maxSize int) {
 	}
 }
 
+// PurgeExpired removes expired entries.
 func (l *LRU[K, V]) PurgeExpired() int {
 	l.listMu.Lock()
 	defer l.listMu.Unlock()
