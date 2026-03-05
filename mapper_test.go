@@ -85,12 +85,12 @@ func TestMapper_SortedKeys(t *testing.T) {
 	}
 }
 
-func TestMapper_ForEach(t *testing.T) {
+func TestMapper_Range(t *testing.T) {
 	m := NewMapper[string, int]()
 	m.Set("key1", 1)
 	m.Set("key2", 2)
 	count := 0
-	m.ForEach(func(k string, v int) {
+	m.Range(func(k string, v int) {
 		count++
 	})
 	if count != 2 {

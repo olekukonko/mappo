@@ -345,8 +345,8 @@ func (l *LRU[K, V]) Values() []V {
 	return values
 }
 
-// ForEach iterates over all items in order.
-func (l *LRU[K, V]) ForEach(fn func(K, V) bool) {
+// Range iterates over all items in order.
+func (l *LRU[K, V]) Range(fn func(K, V) bool) {
 	l.listMu.Lock()
 	defer l.listMu.Unlock()
 

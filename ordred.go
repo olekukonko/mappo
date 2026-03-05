@@ -441,8 +441,8 @@ func (o *Ordered[K, V]) Values() []V {
 	return values
 }
 
-// ForEach iterates over items in order. Return false to stop.
-func (o *Ordered[K, V]) ForEach(fn func(K, V) bool) {
+// Range iterates over items in order. Return false to stop.
+func (o *Ordered[K, V]) Range(fn func(K, V) bool) {
 	if o.muEnabled {
 		o.mu.RLock()
 		defer o.mu.RUnlock()

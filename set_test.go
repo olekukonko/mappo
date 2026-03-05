@@ -52,10 +52,10 @@ func TestSet_Difference(t *testing.T) {
 	}
 }
 
-func TestSet_ForEach(t *testing.T) {
+func TestSet_Range(t *testing.T) {
 	s := NewSet[int](1, 2)
 	count := 0
-	s.ForEach(func(v int) {
+	s.Range(func(v int) {
 		count++
 	})
 	if count != 2 {

@@ -131,7 +131,7 @@ ordered.Set("b", 2)
 ordered.SetFront("c", 3) // Add to front
 
 // Iterate in order
-ordered.ForEach(func(key string, val int) bool {
+ordered.Range(func(key string, val int) bool {
     fmt.Println(key, val)
     return true // continue
 })
@@ -244,7 +244,7 @@ Different use cases need different trade-offs:
 
 - `Get`, `Set`, `Delete`, `Has`, `Len`
 - `Compute`, `Update`, `SetIfAbsent`, `GetOrSet`
-- `ForEach`, `Keys`, `Values`
+- `Range`, `Keys`, `Values`
 - `Clear`, `ClearIf`, `Replace`, `CompareAndSwap`
 
 This allows easy swapping based on performance needs.

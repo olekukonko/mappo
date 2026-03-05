@@ -272,9 +272,9 @@ func (sm *Sharded[K, V]) ShardStats() []int {
 	return stats
 }
 
-// ForEach iterates through all items. Return false to stop iteration.
-// API matches Concurrent.ForEach
-func (sm *Sharded[K, V]) ForEach(fn func(K, V) bool) {
+// Range iterates through all items. Return false to stop iteration.
+// API matches Concurrent.Range
+func (sm *Sharded[K, V]) Range(fn func(K, V) bool) {
 	for i := range sm.shards {
 		cont := true
 		sm.shards[i].data.Range(func(k K, v V) bool {
@@ -290,7 +290,7 @@ func (sm *Sharded[K, V]) ForEach(fn func(K, V) bool) {
 // Keys returns all keys in the map.
 func (sm *Sharded[K, V]) Keys() []K {
 	keys := make([]K, 0, sm.Len())
-	sm.ForEach(func(k K, _ V) bool {
+	sm.Range(func(k K, _ V) bool {
 		keys = append(keys, k)
 		return true
 	})
@@ -300,7 +300,7 @@ func (sm *Sharded[K, V]) Keys() []K {
 // Values returns all values in the map.
 func (sm *Sharded[K, V]) Values() []V {
 	values := make([]V, 0, sm.Len())
-	sm.ForEach(func(_ K, v V) bool {
+	sm.Range(func(_ K, v V) bool {
 		values = append(values, v)
 		return true
 	})

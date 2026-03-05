@@ -74,12 +74,12 @@ func TestOrdered_FrontBack(t *testing.T) {
 	}
 }
 
-func TestOrdered_ForEach(t *testing.T) {
+func TestOrdered_Range(t *testing.T) {
 	o := NewOrdered[string, int]()
 	o.Set("key1", 1)
 	o.Set("key2", 2)
 	count := 0
-	o.ForEach(func(k string, v int) bool {
+	o.Range(func(k string, v int) bool {
 		count++
 		return true
 	})

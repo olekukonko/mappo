@@ -162,8 +162,8 @@ func (m Mapper[K, V]) Values() []V {
 	return values
 }
 
-// ForEach iterates over each key-value pair.
-func (m Mapper[K, V]) ForEach(fn func(K, V)) {
+// Range iterates over each key-value pair.
+func (m Mapper[K, V]) Range(fn func(K, V)) {
 	for k, v := range m {
 		fn(k, v)
 	}

@@ -83,8 +83,8 @@ func (s *Set[T]) Elements() []T {
 	return elems
 }
 
-// ForEach iterates over all elements.
-func (s *Set[T]) ForEach(fn func(T)) {
+// Range iterates over all elements.
+func (s *Set[T]) Range(fn func(T)) {
 	if s.m == nil {
 		return
 	}
@@ -96,7 +96,7 @@ func (s *Set[T]) ForEach(fn func(T)) {
 // Filter returns a new set with elements satisfying the predicate.
 func (s *Set[T]) Filter(fn func(T) bool) *Set[T] {
 	result := NewSet[T]()
-	s.ForEach(func(elem T) {
+	s.Range(func(elem T) {
 		if fn(elem) {
 			result.Add(elem)
 		}
@@ -107,7 +107,7 @@ func (s *Set[T]) Filter(fn func(T) bool) *Set[T] {
 // Clone returns a shallow copy of the set.
 func (s *Set[T]) Clone() *Set[T] {
 	result := NewSet[T]()
-	s.ForEach(func(elem T) {
+	s.Range(func(elem T) {
 		result.Add(elem)
 	})
 	return result

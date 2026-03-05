@@ -87,7 +87,7 @@ func TestLRU_OnEviction(t *testing.T) {
 	}
 }
 
-func TestLRU_KeysForEach(t *testing.T) {
+func TestLRU_KeysRange(t *testing.T) {
 	l := NewLRU[string, string](10)
 	l.Set("key1", "value1")
 	l.Set("key2", "value2")
@@ -96,7 +96,7 @@ func TestLRU_KeysForEach(t *testing.T) {
 		t.Error("expected 2 keys")
 	}
 	count := 0
-	l.ForEach(func(k string, v string) bool {
+	l.Range(func(k string, v string) bool {
 		count++
 		return true
 	})

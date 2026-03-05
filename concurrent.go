@@ -176,13 +176,6 @@ func (c *Concurrent[K, V]) Size() int {
 	return c.Len()
 }
 
-// ForEach iterates over all items. Return false to stop.
-// Expired items are skipped and deleted.
-// API matches Sharded.ForEach
-func (c *Concurrent[K, V]) ForEach(fn func(K, V) bool) {
-	c.Range(fn)
-}
-
 // ClearIf removes entries matching predicate and returns count removed.
 // API matches Sharded.ClearIf
 func (c *Concurrent[K, V]) ClearIf(shouldRemove func(K, V) bool) int {

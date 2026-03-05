@@ -97,12 +97,12 @@ func TestSharded_HasGetOrSet(t *testing.T) {
 	}
 }
 
-func TestSharded_ForEach(t *testing.T) {
+func TestSharded_Range(t *testing.T) {
 	s := NewSharded[string, int]()
 	s.Set("key1", 1)
 	s.Set("key2", 2)
 	count := 0
-	s.ForEach(func(k string, v int) bool {
+	s.Range(func(k string, v int) bool {
 		count++
 		return true
 	})
