@@ -59,14 +59,15 @@ func (c *Concurrent[K, V]) SetTTL(key K, value V, ttl time.Duration) {
 // SetIfAbsent sets the value only if the key doesn't exist.
 // Returns the actual value and true if loaded (already existed).
 func (c *Concurrent[K, V]) SetIfAbsent(key K, value V) (V, bool) {
-	var zero V
 	entry := &concurrentEntry[V]{value: value}
 
 	actual, loaded := c.m.LoadOrStore(key, entry)
 	if loaded {
+		// Someone else stored first: return their value
 		return actual.value, true
 	}
-	return zero, false
+	// We stored first: return the value we just stored
+	return value, false
 }
 
 // Compute allows atomic read-modify-write operations.
