@@ -70,6 +70,12 @@ func (c *Concurrent[K, V]) SetIfAbsent(key K, value V) (V, bool) {
 	return value, false
 }
 
+// LoadOrStore is an alias for GetOrSet for sync.Map API compatibility.
+// Returns the actual value stored for the key and true if the key already existed.
+func (c *Concurrent[K, V]) LoadOrStore(key K, val V) (actual V, loaded bool) {
+	return c.GetOrSet(key, val)
+}
+
 // Compute allows atomic read-modify-write operations.
 func (c *Concurrent[K, V]) Compute(key K, fn func(current V, exists bool) (newValue V, keep bool)) V {
 	c.m.Compute(key, func(oldEntry *concurrentEntry[V], exists bool) (*concurrentEntry[V], bool) {
